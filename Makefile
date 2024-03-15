@@ -1,4 +1,4 @@
-IMAGE_NAMESPACE?=quay.io/argoprojlabs
+IMAGE_NAMESPACE?=058264294114.dkr.ecr.ap-northeast-1.amazonaws.com
 IMAGE_NAME=argocd-image-updater
 IMAGE_TAG?=latest
 ifdef IMAGE_NAMESPACE
@@ -6,7 +6,7 @@ IMAGE_PREFIX=${IMAGE_NAMESPACE}/
 else
 IMAGE_PREFIX=
 endif
-IMAGE_PUSH?=no
+IMAGE_PUSH?=yes
 OS?=$(shell go env GOOS)
 ARCH?=$(shell go env GOARCH)
 OUTDIR?=dist
@@ -90,6 +90,7 @@ multiarch-image:
 	docker buildx build \
 		-t ${IMAGE_PREFIX}${IMAGE_NAME}:${IMAGE_TAG} \
 		--progress plain \
+		--builder multibuilder \
 		--pull \
 		--platform ${RELEASE_IMAGE_PLATFORMS} ${DOCKERX_PUSH} \
 		.
@@ -100,6 +101,7 @@ multiarch-image-push:
 		-t ${IMAGE_PREFIX}${IMAGE_NAME}:${IMAGE_TAG} \
 		--progress plain \
 		--pull \
+		--builder multibuilder \
 		--push \
 		--platform ${RELEASE_IMAGE_PLATFORMS} ${DOCKERX_PUSH} \
 		.

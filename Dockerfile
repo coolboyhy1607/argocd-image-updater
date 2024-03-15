@@ -15,6 +15,8 @@ FROM alpine:latest
 RUN apk update && \
     apk upgrade && \
     apk add ca-certificates git openssh-client python3 py3-pip tini && \
+    python3 -m venv /venv && \
+    . /venv/bin/activate && \
     pip3 install --upgrade pip && \
     pip3 install awscli && \
     rm -rf /var/cache/apk/*
