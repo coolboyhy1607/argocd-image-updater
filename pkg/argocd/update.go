@@ -9,6 +9,8 @@ import (
 	"text/template"
 	"time"
 
+	"golang.org/x/exp/slices"
+
 	"github.com/argoproj-labs/argocd-image-updater/ext/git"
 	"github.com/argoproj-labs/argocd-image-updater/pkg/common"
 	"github.com/argoproj-labs/argocd-image-updater/pkg/image"
@@ -19,6 +21,7 @@ import (
 
 	"github.com/argoproj/argo-cd/v2/pkg/apiclient/application"
 	"github.com/argoproj/argo-cd/v2/pkg/apis/application/v1alpha1"
+	"github.com/miracl/conflate"
 	"gopkg.in/yaml.v2"
 )
 
@@ -68,6 +71,7 @@ type WriteBackConfig struct {
 	GitCommitMessage string
 	KustomizeBase    string
 	Target           string
+	GitRepo          string
 }
 
 // The following are helper structs to only marshal the fields we require
@@ -375,32 +379,98 @@ func setAppImage(app *v1alpha1.Application, img *image.ContainerImage) error {
 
 // marshalParamsOverride marshals the parameter overrides of a given application
 // into YAML bytes
-func marshalParamsOverride(app *v1alpha1.Application) ([]byte, error) {
+func marshalParamsOverride(app *v1alpha1.Application, originalData []byte) ([]byte, error) {
 	var override []byte
 	var err error
 
 	appType := GetApplicationType(app)
+	appSource := getApplicationSource(app)
+
 	switch appType {
 	case ApplicationTypeKustomize:
-		if app.Spec.Source.Kustomize == nil {
+		if appSource.Kustomize == nil {
 			return []byte{}, nil
 		}
-		params := kustomizeOverride{
+
+		var params kustomizeOverride
+		newParams := kustomizeOverride{
 			Kustomize: kustomizeImages{
-				Images: &app.Spec.Source.Kustomize.Images,
+				Images: &appSource.Kustomize.Images,
 			},
 		}
+
+		if len(originalData) == 0 {
+			override, err = yaml.Marshal(newParams)
+			break
+		}
+		err = yaml.Unmarshal(originalData, &params)
+		if err != nil {
+			override, err = yaml.Marshal(newParams)
+			break
+		}
+		mergeKustomizeOverride(&params, &newParams)
 		override, err = yaml.Marshal(params)
 	case ApplicationTypeHelm:
-		if app.Spec.Source.Helm == nil {
+		if appSource.Helm == nil {
 			return []byte{}, nil
 		}
-		params := helmOverride{
-			Helm: helmParameters{
-				Parameters: app.Spec.Source.Helm.Parameters,
-			},
+
+		if strings.HasPrefix(app.Annotations[common.WriteBackTargetAnnotation], common.HelmPrefix) {
+			images := GetImagesFromApplication(app)
+
+			for _, c := range images {
+				helmAnnotationParamName, helmAnnotationParamVersion := getHelmParamNamesFromAnnotation(app.Annotations, c.ImageName)
+				if helmAnnotationParamName == "" {
+					return nil, fmt.Errorf("could not find an image-name annotation for image %s", c.ImageName)
+				}
+				if helmAnnotationParamVersion == "" {
+					return nil, fmt.Errorf("could not find an image-tag annotation for image %s", c.ImageName)
+				}
+
+				helmParamName := getHelmParam(appSource.Helm.Parameters, helmAnnotationParamName)
+				if helmParamName == nil {
+					return nil, fmt.Errorf("%s parameter not found", helmAnnotationParamName)
+				}
+
+				helmParamVersion := getHelmParam(appSource.Helm.Parameters, helmAnnotationParamVersion)
+				if helmParamVersion == nil {
+					return nil, fmt.Errorf("%s parameter not found", helmAnnotationParamVersion)
+				}
+
+				// Build string with YAML format to merge with originalData values
+				helmValues := fmt.Sprintf("%s: %s\n%s: %s", helmAnnotationParamName, helmParamName.Value, helmAnnotationParamVersion, helmParamVersion.Value)
+
+				var mergedParams *conflate.Conflate
+				mergedParams, err = conflate.FromData(originalData, []byte(helmValues))
+				if err != nil {
+					return nil, err
+				}
+
+				override, err = mergedParams.MarshalYAML()
+			}
+		} else {
+			var params helmOverride
+			newParams := helmOverride{
+				Helm: helmParameters{
+					Parameters: appSource.Helm.Parameters,
+				},
+			}
+
+			outputParams := appSource.Helm.ValuesYAML()
+			log.WithContext().AddField("application", app).Debugf("values: '%s'", outputParams)
+
+			if len(originalData) == 0 {
+				override, err = yaml.Marshal(newParams)
+				break
+			}
+			err = yaml.Unmarshal(originalData, &params)
+			if err != nil {
+				override, err = yaml.Marshal(newParams)
+				break
+			}
+			mergeHelmOverride(&params, &newParams)
+			override, err = yaml.Marshal(params)
 		}
-		override, err = yaml.Marshal(params)
 	default:
 		err = fmt.Errorf("unsupported application type")
 	}
@@ -411,12 +481,34 @@ func marshalParamsOverride(app *v1alpha1.Application) ([]byte, error) {
 	return override, nil
 }
 
+func mergeHelmOverride(t *helmOverride, o *helmOverride) {
+	for _, param := range o.Helm.Parameters {
+		idx := slices.IndexFunc(t.Helm.Parameters, func(tp v1alpha1.HelmParameter) bool { return tp.Name == param.Name })
+		if idx != -1 {
+			t.Helm.Parameters[idx] = param
+			continue
+		}
+		t.Helm.Parameters = append(t.Helm.Parameters, param)
+	}
+}
+
+func mergeKustomizeOverride(t *kustomizeOverride, o *kustomizeOverride) {
+	for _, image := range *o.Kustomize.Images {
+		idx := t.Kustomize.Images.Find(image)
+		if idx != -1 {
+			(*t.Kustomize.Images)[idx] = image
+			continue
+		}
+		*t.Kustomize.Images = append(*t.Kustomize.Images, image)
+	}
+}
+
 func getWriteBackConfig(app *v1alpha1.Application, kubeClient *kube.KubernetesClient, argoClient ArgoCD) (*WriteBackConfig, error) {
 	wbc := &WriteBackConfig{}
 	// Default write-back is to use Argo CD API
 	wbc.Method = WriteBackApplication
 	wbc.ArgoClient = argoClient
-	wbc.Target = parseDefaultTarget(app.Name, app.Spec.Source.Path)
+	wbc.Target = parseDefaultTarget(app.Name, getApplicationSource(app).Path)
 
 	// If we have no update method, just return our default
 	method, ok := app.Annotations[common.WriteBackMethodAnnotation]
@@ -435,8 +527,13 @@ func getWriteBackConfig(app *v1alpha1.Application, kubeClient *kube.KubernetesCl
 	switch strings.TrimSpace(method) {
 	case "git":
 		wbc.Method = WriteBackGit
-		if target, ok := app.Annotations[common.WriteBackTargetAnnotation]; ok && strings.HasPrefix(target, common.KustomizationPrefix) {
-			wbc.KustomizeBase = parseTarget(target, app.Spec.Source.Path)
+		target, ok := app.Annotations[common.WriteBackTargetAnnotation]
+		if ok && strings.HasPrefix(target, common.KustomizationPrefix) {
+			wbc.KustomizeBase = parseKustomizeBase(target, getApplicationSource(app).Path)
+		} else if ok && strings.HasPrefix(target, common.HelmPrefix) { // This keeps backward compatibility
+			wbc.Target = parseTarget(target, getApplicationSource(app).Path)
+		} else if ok { // This keeps backward compatibility
+			wbc.Target = app.Annotations[common.WriteBackTargetAnnotation]
 		}
 		if err := parseGitConfig(app, kubeClient, wbc, creds); err != nil {
 			return nil, err
@@ -454,10 +551,21 @@ func parseDefaultTarget(appName string, path string) string {
 	return filepath.Join(path, defaultTargetFile)
 }
 
-func parseTarget(target string, sourcePath string) (kustomizeBase string) {
+func parseKustomizeBase(target string, sourcePath string) (kustomizeBase string) {
 	if target == common.KustomizationPrefix {
 		return filepath.Join(sourcePath, ".")
 	} else if base := target[len(common.KustomizationPrefix)+1:]; strings.HasPrefix(base, "/") {
+		return base[1:]
+	} else {
+		return filepath.Join(sourcePath, base)
+	}
+}
+
+// parseTarget extracts the target path to set in the writeBackConfig configuration
+func parseTarget(writeBackTarget string, sourcePath string) string {
+	if writeBackTarget == common.HelmPrefix {
+		return filepath.Join(sourcePath, "./", common.DefaultHelmValuesFilename)
+	} else if base := writeBackTarget[len(common.HelmPrefix)+1:]; strings.HasPrefix(base, "/") {
 		return base[1:]
 	} else {
 		return filepath.Join(sourcePath, base)
@@ -476,7 +584,12 @@ func parseGitConfig(app *v1alpha1.Application, kubeClient *kube.KubernetesClient
 			wbc.GitWriteBranch = branches[1]
 		}
 	}
-	credsSource, err := getGitCredsSource(creds, kubeClient)
+	wbc.GitRepo = getApplicationSource(app).RepoURL
+	repo, ok := app.Annotations[common.GitRepositoryAnnotation]
+	if ok {
+		wbc.GitRepo = repo
+	}
+	credsSource, err := getGitCredsSource(creds, kubeClient, wbc)
 	if err != nil {
 		return fmt.Errorf("invalid git credentials source: %v", err)
 	}
@@ -486,7 +599,7 @@ func parseGitConfig(app *v1alpha1.Application, kubeClient *kube.KubernetesClient
 
 func commitChangesLocked(app *v1alpha1.Application, wbc *WriteBackConfig, state *SyncIterationState, changeList []ChangeEntry) error {
 	if wbc.RequiresLocking() {
-		lock := state.GetRepositoryLock(app.Spec.Source.RepoURL)
+		lock := state.GetRepositoryLock(wbc.GitRepo)
 		lock.Lock()
 		defer lock.Unlock()
 	}
@@ -501,7 +614,7 @@ func commitChanges(app *v1alpha1.Application, wbc *WriteBackConfig, changeList [
 	case WriteBackApplication:
 		_, err := wbc.ArgoClient.UpdateSpec(context.TODO(), &application.ApplicationUpdateSpecRequest{
 			Name: &app.Name,
-			Spec: app.Spec,
+			Spec: &app.Spec,
 		})
 		if err != nil {
 			return err

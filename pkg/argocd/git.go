@@ -131,7 +131,7 @@ func commitChangesGit(app *v1alpha1.Application, wbc *WriteBackConfig, changeLis
 	logCtx := log.WithContext().AddField("application", app.GetName())
 	creds, err := wbc.GetCreds(app)
 	if err != nil {
-		return fmt.Errorf("could not get creds for repo '%s': %v", app.Spec.Source.RepoURL, err)
+		return fmt.Errorf("could not get creds for repo '%s': %v", wbc.GitRepo, err)
 	}
 	var gitC git.Client
 	if wbc.GitClient == nil {
@@ -145,7 +145,7 @@ func commitChangesGit(app *v1alpha1.Application, wbc *WriteBackConfig, changeLis
 				logCtx.Errorf("could not remove temp dir: %v", err)
 			}
 		}()
-		gitC, err = git.NewClientExt(app.Spec.Source.RepoURL, tempRoot, creds, false, false, "")
+		gitC, err = git.NewClientExt(wbc.GitRepo, tempRoot, creds, false, false, "")
 		if err != nil {
 			return err
 		}
@@ -173,7 +173,7 @@ func commitChangesGit(app *v1alpha1.Application, wbc *WriteBackConfig, changeLis
 	// config, or taken from the application spec's targetRevision. If the
 	// target revision is set to the special value HEAD, or is the empty
 	// string, we'll try to resolve it to a branch name.
-	checkOutBranch := app.Spec.Source.TargetRevision
+	checkOutBranch := getApplicationSource(app).TargetRevision
 	if wbc.GitBranch != "" {
 		checkOutBranch = wbc.GitBranch
 	}
@@ -259,22 +259,28 @@ func writeOverrides(app *v1alpha1.Application, wbc *WriteBackConfig, gitC git.Cl
 		}
 	}
 
-	override, err := marshalParamsOverride(app)
-	if err != nil {
-		return
-	}
-
 	// If the target file already exist in the repository, we will check whether
 	// our generated new file is the same as the existing one, and if yes, we
 	// don't proceed further for commit.
+	var override []byte
+	var originalData []byte
 	if targetExists {
-		data, err := os.ReadFile(targetFile)
+		originalData, err = os.ReadFile(targetFile)
 		if err != nil {
 			return err, false
 		}
-		if string(data) == string(override) {
+		override, err = marshalParamsOverride(app, originalData)
+		if err != nil {
+			return
+		}
+		if string(originalData) == string(override) {
 			logCtx.Debugf("target parameter file and marshaled data are the same, skipping commit.")
 			return nil, true
+		}
+	} else {
+		override, err = marshalParamsOverride(app, nil)
+		if err != nil {
+			return
 		}
 	}
 
@@ -294,18 +300,8 @@ var _ changeWriter = writeOverrides
 // writeKustomization writes any changes required for updating one or more images to a kustomization.yml
 func writeKustomization(app *v1alpha1.Application, wbc *WriteBackConfig, gitC git.Client) (err error, skip bool) {
 	logCtx := log.WithContext().AddField("application", app.GetName())
-	if oldDir, err := os.Getwd(); err != nil {
-		return err, false
-	} else {
-		defer func() {
-			_ = os.Chdir(oldDir)
-		}()
-	}
 
 	base := filepath.Join(gitC.Root(), wbc.KustomizeBase)
-	if err := os.Chdir(base); err != nil {
-		return err, false
-	}
 
 	logCtx.Infof("updating base %s", base)
 
@@ -314,7 +310,7 @@ func writeKustomization(app *v1alpha1.Application, wbc *WriteBackConfig, gitC gi
 		return fmt.Errorf("could not find kustomization in %s", base), false
 	}
 
-	filterFunc, err := imagesFilter(app.Spec.Source.Kustomize.Images)
+	filterFunc, err := imagesFilter(getApplicationSource(app).Kustomize.Images)
 	if err != nil {
 		return err, false
 	}

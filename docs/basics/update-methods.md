@@ -3,7 +3,7 @@
 ## Overview
 
 Argo CD Image Updater supports several methods to propagate new versions of the
-images to Argo CD. These methods are also refered to as *write back methods*.
+images to Argo CD. These methods are also referred to as *write back methods*.
 
 Currently, the following methods are supported:
 
@@ -123,7 +123,9 @@ Example:
 argocd-image-updater.argoproj.io/write-back-method: git:secret:argocd-image-updater/git-creds
 ```
 
-If the repository is accessed using HTTPS, the secret must contain two fields:
+If the repository is accessed using HTTPS, the secret must contain either user credentials or GitHub app credentials.
+
+If the repository is accessed using user credentials, the secret requires two fields
 `username` which holds the Git username, and `password` which holds the user's
 password or a private access token (PAT) with write access to the repository.
 You can generate such a secret using `kubectl`, e.g.:
@@ -134,6 +136,16 @@ kubectl -n argocd-image-updater create secret generic git-creds \
   --from-literal=password=somepassword
 ```
 
+If the repository is accessed using GitHub app credentials, the secret requires three fields `githubAppID` which holds the GitHub Application ID, `githubAppInstallationID` which holds the GitHub Organization Installation ID, and `githubAppPrivateKey` which holds the GitHub Application private key. The GitHub Application must be installed into the target repository with write access.
+You can generate such a secret using `kubectl`, e.g.:
+
+```bash
+kubectl -n argocd-image-updater create secret generic git-creds \
+  --from-literal=githubAppID=applicationid \
+  --from-literal=githubAppInstallationID=installationid \
+  --from-literal=githubAppPrivateKey='-----BEGIN RSA PRIVATE KEY-----PRIVATEKEYDATA-----END RSA PRIVATE KEY-----'
+```
+
 If the repository is accessed using SSH, the secret must contain the field
 `sshPrivateKey`, which holds a SSH private key in OpenSSH-compatible PEM
 format. To create such a secret from an existing private key, you can use
@@ -142,6 +154,22 @@ format. To create such a secret from an existing private key, you can use
 ```bash
 kubectl -n argocd-image-updater create secret generic git-creds \
   --from-file=sshPrivateKey=~/.ssh/id_rsa
+```
+
+### <a name="method-git-repository"></a>Specifying a repository when using a Helm repository in repoURL
+
+By default, Argo CD Image Updater will use the value found in the Application
+spec at `.spec.source.repoURL` as Git repository to checkout. But when using
+a Helm repository as `.spec.source.repoURL` GIT will simply fail. To manually
+specify the repository to push the changes, specify the 
+annotation `argocd-image-updater.argoproj.io/git-repository` on the Application
+manifest.
+
+The value of this annotation will define the Git repository to use, for example the
+following would use a GitHub's repository:
+
+```yaml
+argocd-image-updater.argoproj.io/git-repository: git@github.com:example/example.git
 ```
 
 ### <a name="method-git-branch"></a>Specifying a branch to commit to
@@ -162,7 +190,7 @@ argocd-image-updater.argoproj.io/git-branch: main
 
 ### <a name="method-git-base-commit-branch"></a>Specifying a separate base and commit branch
 
-By default, Argo CD Imager Updater will checkout, commit, and push back to the
+By default, Argo CD Image Updater will checkout, commit, and push back to the
 same branch specified above. There are many scenarios where this is not
 desired or possible, such as when the default branch is protected. You can
 add a separate write-branch by modifying `argocd-image-updater.argoproj.io/git-branch`
@@ -280,3 +308,29 @@ argocd-image-updater.argoproj.io/write-back-target: "kustomization:/config/overl
 ```
 
 Note that the Kustomization directory needs to be specified, not a file, like when using Kustomize.
+
+If you are using Helm and want the image updates parameters available in your values files,
+you may set the `write-back-target` to `helmvalues:<full path to your values file>`. This method commits changes to the values
+file back that is used to render the Helm template.
+
+```yaml
+argocd-image-updater.argoproj.io/write-back-method: git  # all git options are supported
+argocd-image-updater.argoproj.io/write-back-target: helmvalues
+```
+
+You may also specify which helmvalues to update with either a path relative to the project source path...
+
+```yaml
+argocd-image-updater.argoproj.io/write-back-target: "helmvalues:../../values.yaml"
+# if the Application spec.source.path = config/overlays/foo, this would update the helmvalues in config/base 
+```
+
+...or absolute with respect to the repository:
+
+```yaml
+# absolute paths start with /
+argocd-image-updater.argoproj.io/write-back-target: "helmvalues:/helm/config/test-values.yaml"
+```
+
+Note that using the helmvalues option needs the Helm values filename to be specified in the
+write-back-target annotation.
