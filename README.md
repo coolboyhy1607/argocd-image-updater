@@ -1,5 +1,25 @@
 # Argo CD Image Updater
 
+## How to build and push to ECR
+
+### Get token
+
+```bash
+aws ecr get-login-password --region ap-northeast-1 | docker login --username AWS --password-stdin 058264294114.dkr.ecr.ap-northeast-1.amazonaws.com
+```
+
+### Build and push
+
+```bash
+make multiarch-image-push
+```
+
+### Rollout image-updater deployment
+
+```bash
+kubectl rollout restart deployment argocd-image-updater
+```
+
 ![Integration tests](https://github.com/argoproj-labs/argocd-image-updater/workflows/Integration%20tests/badge.svg?branch=master&event=push)
 [![Documentation Status](https://readthedocs.org/projects/argocd-image-updater/badge/?version=latest)](https://argocd-image-updater.readthedocs.io/en/latest/?badge=latest)
 [![codecov](https://codecov.io/gh/argoproj-labs/argocd-image-updater/branch/master/graph/badge.svg)](https://codecov.io/gh/argoproj-labs/argocd-image-updater)
@@ -15,7 +35,7 @@ the Argo CD API.
 
 Currently it will only work with applications that are built using *Kustomize*
 or *Helm* tooling. Applications built from plain YAML or custom tools are not
-supported yet (and maybe never will). 
+supported yet (and maybe never will).
 
 ## Documentation
 

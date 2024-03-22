@@ -14,13 +14,8 @@ FROM alpine:latest
 
 RUN apk update && \
     apk upgrade && \
-    apk add ca-certificates git openssh-client python3 py3-pip tini && \
-    python3 -m venv /venv && \
-    . /venv/bin/activate && \
-    pip3 install --upgrade pip && \
-    pip3 install awscli && \
+    apk add ca-certificates git openssh-client tini aws-cli && \
     rm -rf /var/cache/apk/*
-
 RUN mkdir -p /usr/local/bin
 RUN mkdir -p /app/config
 RUN adduser --home "/app" --disabled-password --uid 1000 argocd

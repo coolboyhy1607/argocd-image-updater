@@ -64,7 +64,7 @@ func (m *nativeGitClient) Branch(sourceBranch string, targetBranch string) error
 	}
 
 	// Check if remote branch already exist
-	_, err := m.runCmd("ls-remote", "--exit-code", "--heads", "origin", targetBranch)
+	err := m.runCredentialedCmd("ls-remote", "--exit-code", "--heads", "origin", targetBranch)
 	if err != nil {
 		log.Infof("branch already exists")
 
@@ -73,13 +73,10 @@ func (m *nativeGitClient) Branch(sourceBranch string, targetBranch string) error
 		if err != nil {
 			return fmt.Errorf("could not checkout target branch: %v", err)
 		}
-
-		// Rebase against source branch
-		_, err = m.runCmd("rebase", sourceBranch)
-		if err != nil {
-			return fmt.Errorf("could not rebase against source branch: %v", err)
+		mergeErr := m.runCredentialedCmd("git", "merge", sourceBranch)
+		if mergeErr != nil {
+			return fmt.Errorf("could not merge main into %s: %v", targetBranch, mergeErr)
 		}
-
 		return nil
 	}
 
@@ -95,6 +92,11 @@ func (m *nativeGitClient) Branch(sourceBranch string, targetBranch string) error
 // Push pushes local changes to the remote branch. If force is true, will force
 // the remote to accept the push.
 func (m *nativeGitClient) Push(remote string, branch string, force bool) error {
+	// Attempt to pull with rebase to integrate remote changes
+    pullErr := m.runCredentialedCmd("git", "pull", remote, branch)
+    if pullErr != nil {
+        return fmt.Errorf("could not pull with rebase from %s: %v", remote, pullErr)
+    }
 	args := []string{"push"}
 	if force {
 		args = append(args, "-f")
