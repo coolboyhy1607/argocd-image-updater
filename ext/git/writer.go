@@ -107,10 +107,10 @@ func (m *nativeGitClient) Branch(sourceBranch string, targetBranch string) error
 // the remote to accept the push.
 func (m *nativeGitClient) Push(remote string, branch string, force bool) error {
 	// Attempt to pull with rebase to integrate remote changes
-    pullErr := m.runCredentialedCmd("git", "pull", remote, branch)
-    if pullErr != nil {
-        return fmt.Errorf("could not pull with rebase from %s: %v", remote, pullErr)
-    }
+	pullErr := m.runCredentialedCmd("pull", remote, branch)
+	if pullErr != nil {
+		return fmt.Errorf("could not pull with rebase from %s: %v", remote, pullErr)
+	}
 	args := []string{"push"}
 	if force {
 		args = append(args, "-f")

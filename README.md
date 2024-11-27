@@ -17,7 +17,7 @@ make multiarch-image-push
 ### Rollout image-updater deployment
 
 ```bash
-kubectl rollout restart deployment argocd-image-updater
+kubectl rollout restart deployment argocd-image-updater -n argocd
 ```
 
 ![Integration tests](https://github.com/argoproj-labs/argocd-image-updater/workflows/Integration%20tests/badge.svg?branch=master&event=push)
