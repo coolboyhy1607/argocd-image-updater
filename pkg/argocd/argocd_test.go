@@ -3,6 +3,7 @@ package argocd
 import (
 	"context"
 	"fmt"
+	"os"
 	"testing"
 
 	"github.com/argoproj-labs/argocd-image-updater/pkg/common"
@@ -76,6 +77,65 @@ func Test_GetImagesFromApplication(t *testing.T) {
 		require.Len(t, imageList, 1)
 		assert.Equal(t, "nginx", imageList[0].ImageName)
 		assert.Nil(t, imageList[0].ImageTag)
+	})
+}
+
+func Test_GetImagesAndAliasesFromApplication(t *testing.T) {
+	t.Run("Get list of images from application", func(t *testing.T) {
+		application := &v1alpha1.Application{
+			ObjectMeta: v1.ObjectMeta{
+				Name:      "test-app",
+				Namespace: "argocd",
+			},
+			Spec: v1alpha1.ApplicationSpec{},
+			Status: v1alpha1.ApplicationStatus{
+				Summary: v1alpha1.ApplicationSummary{
+					Images: []string{"nginx:1.12.2", "that/image", "quay.io/dexidp/dex:v1.23.0"},
+				},
+			},
+		}
+		imageList := GetImagesAndAliasesFromApplication(application)
+		require.Len(t, imageList, 3)
+		assert.Equal(t, "nginx", imageList[0].ImageName)
+		assert.Equal(t, "that/image", imageList[1].ImageName)
+		assert.Equal(t, "dexidp/dex", imageList[2].ImageName)
+	})
+
+	t.Run("Get list of images and image aliases from application that has no images", func(t *testing.T) {
+		application := &v1alpha1.Application{
+			ObjectMeta: v1.ObjectMeta{
+				Name:      "test-app",
+				Namespace: "argocd",
+			},
+			Spec: v1alpha1.ApplicationSpec{},
+			Status: v1alpha1.ApplicationStatus{
+				Summary: v1alpha1.ApplicationSummary{},
+			},
+		}
+		imageList := GetImagesAndAliasesFromApplication(application)
+		assert.Empty(t, imageList)
+	})
+
+	t.Run("Get list of images and aliases from application annotations", func(t *testing.T) {
+		application := &v1alpha1.Application{
+			ObjectMeta: v1.ObjectMeta{
+				Name:      "test-app",
+				Namespace: "argocd",
+				Annotations: map[string]string{
+					common.ImageUpdaterAnnotation: "webserver=nginx",
+				},
+			},
+			Spec: v1alpha1.ApplicationSpec{},
+			Status: v1alpha1.ApplicationStatus{
+				Summary: v1alpha1.ApplicationSummary{
+					Images: []string{"nginx:1.12.2"},
+				},
+			},
+		}
+		imageList := GetImagesAndAliasesFromApplication(application)
+		require.Len(t, imageList, 1)
+		assert.Equal(t, "nginx", imageList[0].ImageName)
+		assert.Equal(t, "webserver", imageList[0].ImageAlias)
 	})
 }
 
@@ -432,11 +492,11 @@ func Test_FilterApplicationsForUpdate(t *testing.T) {
 				},
 			},
 		}
-		filtered, err := FilterApplicationsForUpdate(applicationList, []string{}, "")
+		filtered, err := FilterApplicationsForUpdate(applicationList, []string{})
 		require.NoError(t, err)
 		require.Len(t, filtered, 1)
-		require.Contains(t, filtered, "app1")
-		assert.Len(t, filtered["app1"].Images, 2)
+		require.Contains(t, filtered, "argocd/app1")
+		assert.Len(t, filtered["argocd/app1"].Images, 2)
 	})
 
 	t.Run("Filter for applications with patterns", func(t *testing.T) {
@@ -484,55 +544,13 @@ func Test_FilterApplicationsForUpdate(t *testing.T) {
 				},
 			},
 		}
-		filtered, err := FilterApplicationsForUpdate(applicationList, []string{"app*"}, "")
+		filtered, err := FilterApplicationsForUpdate(applicationList, []string{"app*"})
 		require.NoError(t, err)
 		require.Len(t, filtered, 2)
-		require.Contains(t, filtered, "app1")
-		require.Contains(t, filtered, "app2")
-		assert.Len(t, filtered["app1"].Images, 2)
+		require.Contains(t, filtered, "argocd/app1")
+		require.Contains(t, filtered, "argocd/app2")
+		assert.Len(t, filtered["argocd/app1"].Images, 2)
 	})
-
-	t.Run("Filter for applications with label", func(t *testing.T) {
-		applicationList := []v1alpha1.Application{
-			// Annotated and carries required label
-			{
-				ObjectMeta: v1.ObjectMeta{
-					Name:      "app1",
-					Namespace: "argocd",
-					Annotations: map[string]string{
-						common.ImageUpdaterAnnotation: "nginx, quay.io/dexidp/dex:v1.23.0",
-					},
-					Labels: map[string]string{
-						"custom.label/name": "xyz",
-					},
-				},
-				Spec: v1alpha1.ApplicationSpec{},
-				Status: v1alpha1.ApplicationStatus{
-					SourceType: v1alpha1.ApplicationSourceTypeKustomize,
-				},
-			},
-			// Annotated but does not carry required label
-			{
-				ObjectMeta: v1.ObjectMeta{
-					Name:      "app2",
-					Namespace: "argocd",
-					Annotations: map[string]string{
-						common.ImageUpdaterAnnotation: "nginx, quay.io/dexidp/dex:v1.23.0",
-					},
-				},
-				Spec: v1alpha1.ApplicationSpec{},
-				Status: v1alpha1.ApplicationStatus{
-					SourceType: v1alpha1.ApplicationSourceTypeHelm,
-				},
-			},
-		}
-		filtered, err := FilterApplicationsForUpdate(applicationList, []string{}, "custom.label/name=xyz")
-		require.NoError(t, err)
-		require.Len(t, filtered, 1)
-		require.Contains(t, filtered, "app1")
-		assert.Len(t, filtered["app1"].Images, 2)
-	})
-
 }
 
 func Test_GetHelmParamAnnotations(t *testing.T) {
@@ -541,7 +559,9 @@ func Test_GetHelmParamAnnotations(t *testing.T) {
 			fmt.Sprintf(common.HelmParamImageSpecAnnotation, "myimg"): "image.blub",
 			fmt.Sprintf(common.HelmParamImageTagAnnotation, "myimg"):  "image.blab",
 		}
-		name, tag := getHelmParamNamesFromAnnotation(annotations, "")
+		name, tag := getHelmParamNamesFromAnnotation(annotations, &image.ContainerImage{
+			ImageAlias: "",
+		})
 		assert.Equal(t, "image.name", name)
 		assert.Equal(t, "image.tag", tag)
 	})
@@ -551,7 +571,9 @@ func Test_GetHelmParamAnnotations(t *testing.T) {
 			fmt.Sprintf(common.HelmParamImageSpecAnnotation, "myimg"): "image.path",
 			fmt.Sprintf(common.HelmParamImageTagAnnotation, "myimg"):  "image.tag",
 		}
-		name, tag := getHelmParamNamesFromAnnotation(annotations, "myimg")
+		name, tag := getHelmParamNamesFromAnnotation(annotations, &image.ContainerImage{
+			ImageAlias: "myimg",
+		})
 		assert.Equal(t, "image.path", name)
 		assert.Empty(t, tag)
 	})
@@ -561,7 +583,9 @@ func Test_GetHelmParamAnnotations(t *testing.T) {
 			fmt.Sprintf(common.HelmParamImageNameAnnotation, "myimg"): "image.name",
 			fmt.Sprintf(common.HelmParamImageTagAnnotation, "myimg"):  "image.tag",
 		}
-		name, tag := getHelmParamNamesFromAnnotation(annotations, "myimg")
+		name, tag := getHelmParamNamesFromAnnotation(annotations, &image.ContainerImage{
+			ImageAlias: "myimg",
+		})
 		assert.Equal(t, "image.name", name)
 		assert.Equal(t, "image.tag", tag)
 	})
@@ -571,7 +595,9 @@ func Test_GetHelmParamAnnotations(t *testing.T) {
 			fmt.Sprintf(common.HelmParamImageNameAnnotation, "otherimg"): "image.name",
 			fmt.Sprintf(common.HelmParamImageTagAnnotation, "otherimg"):  "image.tag",
 		}
-		name, tag := getHelmParamNamesFromAnnotation(annotations, "myimg")
+		name, tag := getHelmParamNamesFromAnnotation(annotations, &image.ContainerImage{
+			ImageAlias: "myimg",
+		})
 		assert.Empty(t, name)
 		assert.Empty(t, tag)
 	})
@@ -580,14 +606,18 @@ func Test_GetHelmParamAnnotations(t *testing.T) {
 		annotations := map[string]string{
 			fmt.Sprintf(common.HelmParamImageTagAnnotation, "myimg"): "image.tag",
 		}
-		name, tag := getHelmParamNamesFromAnnotation(annotations, "myimg")
+		name, tag := getHelmParamNamesFromAnnotation(annotations, &image.ContainerImage{
+			ImageAlias: "myimg",
+		})
 		assert.Empty(t, name)
 		assert.Equal(t, "image.tag", tag)
 	})
 
 	t.Run("No suitable annotations found", func(t *testing.T) {
 		annotations := map[string]string{}
-		name, tag := getHelmParamNamesFromAnnotation(annotations, "myimg")
+		name, tag := getHelmParamNamesFromAnnotation(annotations, &image.ContainerImage{
+			ImageAlias: "myimg",
+		})
 		assert.Empty(t, name)
 		assert.Empty(t, tag)
 	})
@@ -993,61 +1023,195 @@ func TestKubernetesClient(t *testing.T) {
 	require.NoError(t, err)
 
 	t.Run("List applications", func(t *testing.T) {
-		apps, err := client.ListApplications()
+		apps, err := client.ListApplications("")
 		require.NoError(t, err)
-		require.Len(t, apps, 1)
-
-		assert.ElementsMatch(t, []string{"test-app1"}, []string{app1.Name})
+		require.Len(t, apps, 2)
+		assert.ElementsMatch(t, []string{"test-app1", "test-app2"}, []string{app1.Name, app2.Name})
 	})
 
-	t.Run("Get application successful", func(t *testing.T) {
+	t.Run("Get application test-app1 successful", func(t *testing.T) {
 		app, err := client.GetApplication(context.TODO(), "test-app1")
 		require.NoError(t, err)
 		assert.Equal(t, "test-app1", app.GetName())
 	})
 
+	t.Run("Get application test-app2 successful", func(t *testing.T) {
+		app, err := client.GetApplication(context.TODO(), "test-app2")
+		require.NoError(t, err)
+		assert.Equal(t, "test-app2", app.GetName())
+	})
+
 	t.Run("Get application not found", func(t *testing.T) {
-		_, err := client.GetApplication(context.TODO(), "test-app2")
+		_, err := client.GetApplication(context.TODO(), "test-app-non-existent")
 		require.Error(t, err)
-		assert.True(t, errors.IsNotFound(err))
+		assert.Contains(t, err.Error(), "application test-app-non-existent not found")
+	})
+
+	t.Run("List and Get applications errors", func(t *testing.T) {
+		// Create a fake clientset
+		clientset := fake.NewSimpleClientset()
+
+		// Simulate an error in the List action
+		clientset.PrependReactor("list", "applications", func(action k8stesting.Action) (handled bool, ret runtime.Object, err error) {
+			return true, nil, errors.NewInternalError(fmt.Errorf("list error"))
+		})
+
+		// Create the Kubernetes client
+		client, err := NewK8SClient(&kube.KubernetesClient{
+			ApplicationsClientset: clientset,
+		})
+		require.NoError(t, err)
+
+		// Test ListApplications error handling
+		apps, err := client.ListApplications("")
+		assert.Nil(t, apps)
+		assert.EqualError(t, err, "error listing applications: Internal error occurred: list error")
+
+		// Test GetApplication error handling
+		_, err = client.GetApplication(context.TODO(), "test-app")
+		assert.Error(t, err)
+		assert.Contains(t, err.Error(), "error listing applications: Internal error occurred: list error")
+	})
+
+	t.Run("Get applications with multiple applications found", func(t *testing.T) {
+		// Create a fake clientset with multiple applications having the same name
+		clientset := fake.NewSimpleClientset(
+			&v1alpha1.Application{
+				ObjectMeta: v1.ObjectMeta{Name: "test-app", Namespace: "ns1"},
+				Spec:       v1alpha1.ApplicationSpec{},
+			},
+			&v1alpha1.Application{
+				ObjectMeta: v1.ObjectMeta{Name: "test-app", Namespace: "ns2"},
+				Spec:       v1alpha1.ApplicationSpec{},
+			},
+		)
+
+		// Create the Kubernetes client
+		client, err := NewK8SClient(&kube.KubernetesClient{
+			ApplicationsClientset: clientset,
+		})
+		require.NoError(t, err)
+
+		// Test GetApplication with multiple matching applications
+		_, err = client.GetApplication(context.TODO(), "test-app")
+		assert.Error(t, err)
+		assert.EqualError(t, err, "multiple applications found matching test-app")
 	})
 }
 
-func TestKubernetesClient_UpdateSpec_Conflict(t *testing.T) {
+func TestKubernetesClientUpdateSpec(t *testing.T) {
 	app := &v1alpha1.Application{
 		ObjectMeta: v1.ObjectMeta{Name: "test-app", Namespace: "testns"},
 	}
 	clientset := fake.NewSimpleClientset(app)
 
-	attempts := 0
-	clientset.PrependReactor("update", "*", func(action k8stesting.Action) (handled bool, ret runtime.Object, err error) {
-		if attempts == 0 {
-			attempts++
-			return true, nil, errors.NewConflict(
-				schema.GroupResource{Group: "argoproj.io", Resource: "Application"}, app.Name, fmt.Errorf("conflict updating %s", app.Name))
-		} else {
-			return false, nil, nil
+	t.Run("Successful update after conflict retry", func(t *testing.T) {
+		attempts := 0
+		clientset.PrependReactor("update", "*", func(action k8stesting.Action) (handled bool, ret runtime.Object, err error) {
+			if attempts == 0 {
+				attempts++
+				return true, nil, errors.NewConflict(
+					schema.GroupResource{Group: "argoproj.io", Resource: "Application"}, app.Name, fmt.Errorf("conflict updating %s", app.Name))
+			} else {
+				return false, nil, nil
+			}
+		})
+
+		client, err := NewK8SClient(&kube.KubernetesClient{
+			ApplicationsClientset: clientset,
+		})
+		require.NoError(t, err)
+
+		appName := "test-app"
+		spec, err := client.UpdateSpec(context.TODO(), &application.ApplicationUpdateSpecRequest{
+			Name: &appName,
+			Spec: &v1alpha1.ApplicationSpec{Source: &v1alpha1.ApplicationSource{
+				RepoURL: "https://github.com/argoproj/argocd-example-apps",
+			}},
+		})
+
+		require.NoError(t, err)
+		assert.Equal(t, "https://github.com/argoproj/argocd-example-apps", spec.Source.RepoURL)
+	})
+
+	t.Run("UpdateSpec errors - application not found", func(t *testing.T) {
+		// Create a fake empty clientset
+		clientset := fake.NewSimpleClientset()
+
+		client, err := NewK8SClient(&kube.KubernetesClient{
+			ApplicationsClientset: clientset,
+		})
+		require.NoError(t, err)
+
+		appName := "test-app"
+		appNamespace := "testns"
+		spec := &application.ApplicationUpdateSpecRequest{
+			Name:         &appName,
+			AppNamespace: &appNamespace,
+			Spec:         &v1alpha1.ApplicationSpec{},
 		}
+
+		_, err = client.UpdateSpec(context.TODO(), spec)
+		assert.Error(t, err)
+		assert.Contains(t, err.Error(), "error getting application: application test-app not found")
 	})
 
-	client, err := NewK8SClient(&kube.KubernetesClient{
-		Namespace:             "testns",
-		ApplicationsClientset: clientset,
+	t.Run("UpdateSpec errors - conflict failing retries", func(t *testing.T) {
+		clientset := fake.NewSimpleClientset(&v1alpha1.Application{
+			ObjectMeta: v1.ObjectMeta{Name: "test-app", Namespace: "testns"},
+			Spec:       v1alpha1.ApplicationSpec{},
+		})
+
+		client, err := NewK8SClient(&kube.KubernetesClient{
+			ApplicationsClientset: clientset,
+		})
+		require.NoError(t, err)
+
+		clientset.PrependReactor("update", "applications", func(action k8stesting.Action) (handled bool, ret runtime.Object, err error) {
+			return true, nil, errors.NewConflict(v1alpha1.Resource("applications"), "test-app", fmt.Errorf("conflict error"))
+		})
+
+		os.Setenv("OVERRIDE_MAX_RETRIES", "0")
+		defer os.Unsetenv("OVERRIDE_MAX_RETRIES")
+
+		appName := "test-app"
+		spec := &application.ApplicationUpdateSpecRequest{
+			Name: &appName,
+			Spec: &v1alpha1.ApplicationSpec{},
+		}
+
+		_, err = client.UpdateSpec(context.TODO(), spec)
+		assert.Error(t, err)
+		assert.Contains(t, err.Error(), "max retries(0) reached while updating application: test-app")
 	})
-	require.NoError(t, err)
 
-	appName := "test-app"
+	t.Run("UpdateSpec errors - non-conflict update error", func(t *testing.T) {
+		clientset := fake.NewSimpleClientset(&v1alpha1.Application{
+			ObjectMeta: v1.ObjectMeta{Name: "test-app", Namespace: "testns"},
+			Spec:       v1alpha1.ApplicationSpec{},
+		})
 
-	spec, err := client.UpdateSpec(context.TODO(), &application.ApplicationUpdateSpecRequest{
-		Name: &appName,
-		Spec: &v1alpha1.ApplicationSpec{Source: &v1alpha1.ApplicationSource{
-			RepoURL: "https://github.com/argoproj/argocd-example-apps",
-		}},
+		client, err := NewK8SClient(&kube.KubernetesClient{
+			ApplicationsClientset: clientset,
+		})
+		require.NoError(t, err)
+
+		clientset.PrependReactor("update", "applications", func(action k8stesting.Action) (handled bool, ret runtime.Object, err error) {
+			return true, nil, fmt.Errorf("non-conflict error")
+		})
+
+		appName := "test-app"
+		appNamespace := "testns"
+		spec := &application.ApplicationUpdateSpecRequest{
+			Name:         &appName,
+			AppNamespace: &appNamespace,
+			Spec:         &v1alpha1.ApplicationSpec{},
+		}
+
+		_, err = client.UpdateSpec(context.TODO(), spec)
+		assert.Error(t, err)
+		assert.Contains(t, err.Error(), "error updating application: non-conflict error")
 	})
-
-	require.NoError(t, err)
-
-	assert.Equal(t, "https://github.com/argoproj/argocd-example-apps", spec.Source.RepoURL)
 }
 
 func Test_parseImageList(t *testing.T) {
